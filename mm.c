@@ -70,6 +70,7 @@ static const size_t min_block_size = 4*sizeof(word_t); // Minimum block size
 static const size_t chunksize = (1 << 12);    // requires (chunksize % 16 == 0)
 
 static const word_t alloc_mask = 0x1;
+static const word_t prev_alloc_mask = 0x2;
 static const word_t size_mask = ~(word_t)0xF;
 
 typedef struct block
@@ -126,12 +127,12 @@ static block_t *find_prev(block_t *block);
 /*
  * <what does mm_init do?>
  */
-bool mm_init(void) 
+bool mm_init(void)
 {
-    // Create the initial empty heap 
+    // Create the initial empty heap
     word_t *start = (word_t *)(mem_sbrk(2*wsize));
 
-    if (start == (void *)-1) 
+    if (start == (void *)-1)
     {
         return false;
     }
@@ -152,7 +153,7 @@ bool mm_init(void)
 /*
  * <what does mmalloc do?>
  */
-void *malloc(size_t size) 
+void *malloc(size_t size)
 {
     dbg_requires(mm_checkheap(__LINE__));
     size_t asize;      // Adjusted block size
@@ -179,7 +180,7 @@ void *malloc(size_t size)
 
     // If no fit is found, request more memory, and then and place the block
     if (block == NULL)
-    {  
+    {
         extendsize = max(asize, chunksize);
         block = extend_heap(extendsize);
         if (block == NULL) // extend_heap returns an error
@@ -194,7 +195,7 @@ void *malloc(size_t size)
 
     dbg_ensures(mm_checkheap(__LINE__));
     return bp;
-} 
+}
 
 /*
  * <what does free do?>
@@ -269,11 +270,11 @@ void *calloc(size_t elements, size_t size)
     size_t asize = elements * size;
 
     if (asize/elements != size)
-    {    
+    {
         // Multiplication overflowed
         return NULL;
     }
-    
+
     bp = malloc(asize);
     if (bp == NULL)
     {
@@ -290,7 +291,7 @@ void *calloc(size_t elements, size_t size)
 /*
  * <what does extend_heap do?>
  */
-static block_t *extend_heap(size_t size) 
+static block_t *extend_heap(size_t size)
 {
     void *bp;
 
@@ -300,8 +301,8 @@ static block_t *extend_heap(size_t size)
     {
         return NULL;
     }
-    
-    // Initialize free block header/footer 
+
+    // Initialize free block header/footer
     block_t *block = payload_to_header(bp);
     write_header(block, size, false);
     write_footer(block, size, false);
@@ -314,12 +315,32 @@ static block_t *extend_heap(size_t size)
 }
 
 /*
- * <what does coalesce do?>
+ * coalesce: Coalesces (and frees) a block with any already free adjacent
+ *           blocks. Returns a pointer to the beginning of that block.
  */
-static block_t *coalesce(block_t * block) 
+static block_t *coalesce(block_t * block)
 {
-    // fill me in
-    return block;
+    block_t* new_block = block;
+    size_t size = get_size(block);
+
+    // block_t* prev_block = find_prev(block);
+    word_t* prev_footer = find_prev_footer(block);
+    block_t* next_block = find_next(block);
+    // printf("%li\t", size);
+
+    if(!get_alloc(next_block)) {
+        size += get_size(next_block);
+    }
+
+    if(!extract_alloc(*prev_footer)) {
+        size += extract_size(*prev_footer);
+        new_block = find_prev(block);
+    }
+    // printf("%li\n", size);
+
+    write_header(new_block, size, false);
+    write_footer(new_block, size, false);
+    return new_block;
 }
 
 /*
@@ -341,7 +362,7 @@ static void place(block_t *block, size_t asize)
     }
 
     else
-    { 
+    {
         write_header(block, csize, true);
         write_footer(block, csize, true);
     }
@@ -366,12 +387,12 @@ static block_t *find_fit(size_t asize)
     return NULL; // no fit found
 }
 
-/* 
+/*
  * <what does your heap checker do?>
  * Please keep modularity in mind when you're writing the heap checker!
  */
-bool mm_checkheap(int line)  
-{ 
+bool mm_checkheap(int line)
+{
     (void)line; // delete this line; it's a placeholder so that the compiler
                 // will not warn you about an unused variable.
     return true;
