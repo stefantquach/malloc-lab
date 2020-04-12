@@ -325,6 +325,7 @@ static block_t *extend_heap(size_t size)
 
     // Coalesce in case the neighboring blocks are free
     return coalesce(block);
+
 }
 
 /*
@@ -368,6 +369,8 @@ static void place(block_t *block, size_t asize)
     {
         write_header(block, asize, true);
         // write_footer(block, asize, true); no need to put a footer
+        // clearing old footer
+        *(word_t*)((char*)block+get_size(block)) = 0;
 
         // the new block split must be free
         block_next = find_next(block);
@@ -412,8 +415,41 @@ static block_t *find_fit(size_t asize)
  */
 bool mm_checkheap(int line)
 {
-    (void)line; // delete this line; it's a placeholder so that the compiler
-                // will not warn you about an unused variable.
+    // iterating over the entire heap
+    block_t* cur_block;
+    bool freed = false;
+    for(cur_block=heap_start; cur_block < (block_t*)mem_heap_hi()-1;
+        cur_block=(block_t*)((char*)cur_block+get_size(cur_block)))
+    {
+
+        // checking for two contiguous free block
+        if(freed && !get_alloc(cur_block)) {
+            fprintf(stderr, "Two consecutive free blocks %p. Called at line %i.\n",
+                    cur_block, line);
+            return false;
+        }
+
+        // checking headers and footers match (only for free blocks)
+        freed = !get_alloc(cur_block);
+        if(freed)
+        {
+            word_t* footerp = (word_t *)((cur_block->payload) +
+                                get_size(cur_block) - dsize);
+            if(cur_block->header != *footerp)
+            {
+                fprintf(stderr, "Header and footer do not match for block"
+                        "%p. Called at line %i.\n", cur_block, line);
+                return false;
+            }
+        }
+
+        // checking if the blocks are always within range
+        if((block_t*)((char*)cur_block+get_size(cur_block)) > (block_t*)mem_heap_hi()) {
+            fprintf(stderr, "Size of block %p extends past heap range."
+                            "Called on line %i", cur_block, line);
+            return false;
+        }
+    }
 
     return true;
 }
@@ -542,8 +578,7 @@ static void update_prev_alloc(block_t *block, bool prev_alloc)
     block->header |= prev_alloc << 1;  // writing the prev_alloc bit
 
     // writing prev_alloc for footer
-
-    if(get_alloc(block)) {
+    if(!get_alloc(block)) {
         word_t *footerp = (word_t *)((block->payload) + get_size(block) - dsize);
         *footerp &= ~prev_alloc_mask;
         *footerp |= prev_alloc << 1;
