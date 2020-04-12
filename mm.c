@@ -104,7 +104,7 @@ static block_t *coalesce(block_t *block);
 
 static size_t max(size_t x, size_t y);
 static size_t round_up(size_t size, size_t n);
-static word_t pack(size_t size, bool alloc);
+static word_t pack(size_t size, bool alloc, bool prev_alloc);
 
 static size_t extract_size(word_t header);
 static size_t get_size(block_t *block);
@@ -112,9 +112,12 @@ static size_t get_payload_size(block_t *block);
 
 static bool extract_alloc(word_t header);
 static bool get_alloc(block_t *block);
+static bool extract_prev_alloc(word_t header);
+static bool get_prev_alloc(block_t *block);
 
 static void write_header(block_t *block, size_t size, bool alloc);
 static void write_footer(block_t *block, size_t size, bool alloc);
+static void update_prev_alloc(block_t *block, bool prev_alloc);
 
 static block_t *payload_to_header(void *bp);
 static void *header_to_payload(block_t *block);
@@ -125,7 +128,8 @@ static block_t *find_prev(block_t *block);
 
 
 /*
- * <what does mm_init do?>
+ * mm_init: Initializes heap variables and requests chunksize bytes for heap.
+ *          returns true if heap was successfully initialized, false otherwise.
  */
 bool mm_init(void)
 {
@@ -137,8 +141,9 @@ bool mm_init(void)
         return false;
     }
 
-    start[0] = pack(0, true); // Prologue footer
-    start[1] = pack(0, true); // Epilogue header
+    // Prologue footer's prev_alloc field does not matter
+    start[0] = pack(0, true, false); // Prologue footer
+    start[1] = pack(0, true, true); // Epilogue header
     // Heap starts with first "block header", currently the epilogue footer
     heap_start = (block_t *) &(start[1]);
 
@@ -147,15 +152,18 @@ bool mm_init(void)
     {
         return false;
     }
+
     return true;
 }
 
 /*
- * <what does mmalloc do?>
+ * malloc: Allocates new block of at least size bytes. Returns a pointer to the
+ *         payload of the newly allocated block.
  */
 void *malloc(size_t size)
 {
     dbg_requires(mm_checkheap(__LINE__));
+
     size_t asize;      // Adjusted block size
     size_t extendsize; // Amount to extend heap if no fit is found
     block_t *block;
@@ -187,7 +195,6 @@ void *malloc(size_t size)
         {
             return bp;
         }
-
     }
 
     place(block, asize);
@@ -198,7 +205,8 @@ void *malloc(size_t size)
 }
 
 /*
- * <what does free do?>
+ * free: Frees a given block in the heap. bp is a pointer to the payload of the
+ *       block.
  */
 void free(void *bp)
 {
@@ -210,11 +218,15 @@ void free(void *bp)
     block_t *block = payload_to_header(bp);
     size_t size = get_size(block);
 
+    // updating header and writing footer for this block
     write_header(block, size, false);
     write_footer(block, size, false);
 
-    coalesce(block);
+    // updating header for next block
+    block_t *next_block = find_next(block);
+    update_prev_alloc(next_block, false);
 
+    coalesce(block);
 }
 
 /*
@@ -289,7 +301,7 @@ void *calloc(size_t elements, size_t size)
 /******** The remaining content below are helper and debug routines ********/
 
 /*
- * <what does extend_heap do?>
+ * extend_heap: Extends heap by size bytes. Uses sbrk
  */
 static block_t *extend_heap(size_t size)
 {
@@ -309,8 +321,9 @@ static block_t *extend_heap(size_t size)
     // Create new epilogue header
     block_t *block_next = find_next(block);
     write_header(block_next, 0, true);
+    update_prev_alloc(block_next, false);
 
-    // Coalesce in case the previous block was free
+    // Coalesce in case the neighboring blocks are free
     return coalesce(block);
 }
 
@@ -323,20 +336,20 @@ static block_t *coalesce(block_t * block)
     block_t* new_block = block;
     size_t size = get_size(block);
 
-    // block_t* prev_block = find_prev(block);
-    word_t* prev_footer = find_prev_footer(block);
+    // checking next
     block_t* next_block = find_next(block);
-    // printf("%li\t", size);
-
     if(!get_alloc(next_block)) {
         size += get_size(next_block);
     }
 
-    if(!extract_alloc(*prev_footer)) {
-        size += extract_size(*prev_footer);
-        new_block = find_prev(block);
+    // checking previous
+    if(!get_prev_alloc(block)) {
+        word_t* prev_footer = find_prev_footer(block);
+        if(!extract_alloc(*prev_footer)) {
+            size += extract_size(*prev_footer);
+            new_block = find_prev(block);
+        }
     }
-    // printf("%li\n", size);
 
     write_header(new_block, size, false);
     write_footer(new_block, size, false);
@@ -344,27 +357,33 @@ static block_t *coalesce(block_t * block)
 }
 
 /*
- * <what does place do?>
+ * place: Places block in heap. Updates headers and footers for blocks
  */
 static void place(block_t *block, size_t asize)
 {
     size_t csize = get_size(block);
-
+    block_t *block_next;
+    // splitting block
     if ((csize - asize) >= min_block_size)
     {
-        block_t *block_next;
         write_header(block, asize, true);
-        write_footer(block, asize, true);
+        // write_footer(block, asize, true); no need to put a footer
 
+        // the new block split must be free
         block_next = find_next(block);
         write_header(block_next, csize-asize, false);
         write_footer(block_next, csize-asize, false);
+        update_prev_alloc(block_next, true);
     }
 
     else
     {
+        // writing new header
         write_header(block, csize, true);
-        write_footer(block, csize, true);
+        // write_footer(block, csize, true);
+
+        block_next = find_next(block);
+        update_prev_alloc(block_next, true);
     }
 }
 
@@ -395,6 +414,7 @@ bool mm_checkheap(int line)
 {
     (void)line; // delete this line; it's a placeholder so that the compiler
                 // will not warn you about an unused variable.
+
     return true;
 }
 
@@ -418,9 +438,10 @@ static size_t round_up(size_t size, size_t n)
  * pack: returns a header reflecting a specified size and its alloc status.
  *       If the block is allocated, the lowest bit is set to 1, and 0 otherwise.
  */
-static word_t pack(size_t size, bool alloc)
+static word_t pack(size_t size, bool alloc, bool prev_alloc)
 {
-    return alloc ? (size | alloc_mask) : size;
+    // return alloc ? (size | alloc_mask) : size;
+    return size | alloc | (prev_alloc << 1);
 }
 
 
@@ -471,26 +492,63 @@ static bool get_alloc(block_t *block)
 }
 
 /*
+ * extract_prev_alloc:
+ */
+static bool extract_prev_alloc(word_t header)
+{
+    return (bool)(header & prev_alloc_mask);
+}
+
+/*
+ * get_prev_alloc:
+ */
+static bool get_prev_alloc(block_t *block)
+{
+    return extract_prev_alloc(block->header);
+}
+
+/*
  * write_header: given a block and its size and allocation status,
  *               writes an appropriate value to the block header.
+ * Note: this method only updates the size and alloc field. It does not effect
+ *       the prev_alloc bit at all.
  */
 static void write_header(block_t *block, size_t size, bool alloc)
 {
-    block->header = pack(size, alloc);
+    block->header = pack(size, alloc, block->header & prev_alloc_mask);
 }
-
 
 /*
  * write_footer: given a block and its size and allocation status,
  *               writes an appropriate value to the block footer by first
  *               computing the position of the footer.
+ * Note: this method only updates the size and alloc field. It does not effect
+ *       the prev_alloc bit at all.
  */
 static void write_footer(block_t *block, size_t size, bool alloc)
 {
     word_t *footerp = (word_t *)((block->payload) + get_size(block) - dsize);
-    *footerp = pack(size, alloc);
+    *footerp = pack(size, alloc, (block->header & prev_alloc_mask));
 }
 
+/*
+ * update_prev_alloc: updates the prev_alloc bit in both header and footer for
+ *                    a given block. Only updates footer if the block is free.
+ */
+static void update_prev_alloc(block_t *block, bool prev_alloc)
+{
+    // writing prev_alloc for header
+    block->header &= ~prev_alloc_mask; // clearing prev_alloc bit
+    block->header |= prev_alloc << 1;  // writing the prev_alloc bit
+
+    // writing prev_alloc for footer
+
+    if(get_alloc(block)) {
+        word_t *footerp = (word_t *)((block->payload) + get_size(block) - dsize);
+        *footerp &= ~prev_alloc_mask;
+        *footerp |= prev_alloc << 1;
+    }
+}
 
 /*
  * find_next: returns the next consecutive block on the heap by adding the
