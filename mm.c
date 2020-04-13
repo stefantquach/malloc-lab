@@ -137,6 +137,7 @@ static bool get_prev_alloc(block_t *block);
 static void write_header(block_t *block, size_t size, bool alloc);
 static void write_footer(block_t *block, size_t size, bool alloc);
 static void update_prev_alloc(block_t *block, bool prev_alloc);
+static void initialize_list(block_t* block);
 
 static block_t *payload_to_header(void *bp);
 static void *header_to_payload(block_t *block);
@@ -166,6 +167,7 @@ bool mm_init(void)
     start[1] = pack(0, true, true); // Epilogue header
     // Heap starts with first "block header", currently the epilogue footer
     heap_start = (block_t *) &(start[1]);
+    free_ptr = NULL;
 
     // Extend the empty heap with a free block of chunksize bytes
     if (extend_heap(chunksize) == NULL)
@@ -358,10 +360,7 @@ static block_t *extend_heap(size_t size)
     else
     {
         // initializing free_ptr if its not set
-        free_ptr = block;
-        free_ptr->payload.list_node.next = block;
-        free_ptr->payload.list_node.prev = block;
-        free_count = 1;
+        initialize_list(block);
     }
 
     // Coalesce in case the neighboring blocks are free
@@ -379,8 +378,29 @@ static block_t *coalesce(block_t * block)
     block_t* new_block = block;
     size_t size = get_size(block);
 
-    block_t* next_block = find_next(block);
+    // checking previous
+    if(!get_prev_alloc(block))
+    {
+        word_t* prev_footer = find_prev_footer(block);
+        if(!extract_alloc(*prev_footer)) {
+            size += extract_size(*prev_footer);
+            new_block = find_prev(block);
+            remove_block(new_block);
+            *prev_footer = 0;
+            //
+            new_block->payload.list_node.next = block->payload.list_node.next;
+            new_block->payload.list_node.prev = block->payload.list_node.prev;
+            block->payload.list_node.next->payload.list_node.prev = new_block;
+            block->payload.list_node.prev->payload.list_node.next = new_block;
 
+            if(block == free_ptr)
+            {
+                free_ptr = new_block;
+            }
+        }
+    }
+
+    block_t* next_block = find_next(block);
     // checking next
     if(!get_alloc(next_block))
     {
@@ -390,29 +410,6 @@ static block_t *coalesce(block_t * block)
         if(next_block == free_ptr)
         {
             free_ptr = new_block;
-        }
-    }
-
-    // checking previous
-    if(!get_prev_alloc(block))
-    {
-        word_t* prev_footer = find_prev_footer(block);
-        if(!extract_alloc(*prev_footer)) {
-            size += extract_size(*prev_footer);
-            new_block = find_prev(block);
-            remove_block(new_block);
-
-            //
-            new_block->payload.list_node.next = block->payload.list_node.next;
-            new_block->payload.list_node.prev = block->payload.list_node.prev;
-            find_next_free(block)->payload.list_node.prev = new_block;
-            block->payload.list_node.prev->payload.list_node.next = new_block;
-
-            if(block == free_ptr)
-            {
-                free_ptr = new_block;
-            }
-            // add_free_block(new_block);
         }
     }
 
@@ -472,13 +469,15 @@ static void place(block_t *block, size_t asize)
         block_next = find_next(block);
         update_prev_alloc(block_next, true);
 
-        // removing block from list
-        remove_block(block);
-        // if(free_ptr != find_next_free(free_ptr)) // if there is more than one node
-        if(free_count > 0)
+        if(free_count > 1)
             free_ptr = find_next_free(block);
         else
             free_ptr = NULL;
+
+        // removing block from list
+        remove_block(block);
+        // if(free_ptr != find_next_free(free_ptr)) // if there is more than one node
+
     }
 }
 
@@ -531,6 +530,8 @@ static void remove_block(block_t *block)
     next_blk->payload.list_node.prev = prev_blk;
     prev_blk->payload.list_node.next = next_blk;
     --free_count;
+    block->payload.list_node.next = 0;
+    block->payload.list_node.prev = 0;
 }
 
 /*
@@ -617,16 +618,25 @@ bool mm_checkheap(int line)
 
     // checking free list
     cur_block = free_ptr;
+    // block_t* last_block = free_ptr->payload.list_node.prev;
     if(free_ptr)
     {
         do
         {
+            // // checking if prev matches
+            // if(cur_block->payload.list_node.prev == last_block)
+            // {
+            //     printf("Prev pointer for block %p do not match. Called at %i\n",
+            //             cur_block, line);
+            //     return false;
+            // }
             // checking alloc bit to make sure block is free
             if(get_alloc(cur_block)) {
                 printf("Block %p in free list but is not free. Called at line %i\n",
                        cur_block, line);
                 return false;
             }
+            // last_block = cur_block;
             cur_block = find_next_free(cur_block);
         } while(free_ptr && cur_block != free_ptr);
     }
@@ -782,6 +792,17 @@ static void update_prev_alloc(block_t *block, bool prev_alloc)
         *footerp &= ~prev_alloc_mask;
         *footerp |= prev_alloc << 1;
     }
+}
+
+/*
+ * initialize_list: Initializes circular linked list with the given block
+ */
+static void initialize_list(block_t* block)
+{
+    free_ptr = block;
+    block->payload.list_node.next = block;
+    block->payload.list_node.prev = block;
+    free_count = 1;
 }
 
 /*
