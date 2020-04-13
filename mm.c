@@ -356,7 +356,6 @@ static block_t *extend_heap(size_t size)
     {
         add_free_block(block);
         free_ptr=block;
-        // ++free_count;
     }
     else
     {
@@ -365,9 +364,7 @@ static block_t *extend_heap(size_t size)
     }
 
     // Coalesce in case the neighboring blocks are free
-    block_t* ret = coalesce(block);
-    // dbg_ensures(mm_checkheap(__LINE__));
-    return ret;
+    return coalesce(block);
 }
 
 /*
@@ -387,13 +384,13 @@ static block_t *coalesce(block_t * block)
             size += extract_size(*prev_footer);
             new_block = find_prev(block);
             remove_block(new_block);
-            *prev_footer = 0;
-            //
+
+            // moving references from old block to new block
             new_block->payload.list_node.next = block->payload.list_node.next;
             new_block->payload.list_node.prev = block->payload.list_node.prev;
             block->payload.list_node.next->payload.list_node.prev = new_block;
             block->payload.list_node.prev->payload.list_node.next = new_block;
-
+            // reassigning free ptr if it is the block
             if(block == free_ptr)
             {
                 free_ptr = new_block;
@@ -477,8 +474,6 @@ static void place(block_t *block, size_t asize)
 
         // removing block from list
         remove_block(block);
-        // if(free_ptr != find_next_free(free_ptr)) // if there is more than one node
-
     }
 }
 
@@ -489,19 +484,20 @@ static void place(block_t *block, size_t asize)
  */
 static block_t *find_fit(size_t asize)
 {
-    int i;
     block_t *block = free_ptr;
-    // block_t *last_block = free_ptr->payload.list_node.prev;
 
-    for (i=0; i<free_count; ++i)
-    {
-        if (asize <= get_size(block))
+    if(free_ptr) {
+        do
         {
-            // free_ptr = block; // updating free_ptr for next_fit policy
-            return block;
-        }
-        block = find_next_free(block);
+            if (asize <= get_size(block))
+            {
+                return block;
+            }
+            block = find_next_free(block);
+        } while(block != free_ptr);
     }
+
+
     return NULL; // no fit found
 }
 
@@ -535,13 +531,10 @@ static void remove_block(block_t *block)
     next_blk->payload.list_node.prev = prev_blk;
     prev_blk->payload.list_node.next = next_blk;
     --free_count;
-    block->payload.list_node.next = 0;
-    block->payload.list_node.prev = 0;
 }
 
 /*
- * <what does your heap checker do?>
- * Please keep modularity in mind when you're writing the heap checker!
+ * mm_checkheap: Checks heap consistency. See comments below for specific tests
  */
 bool mm_checkheap(int line)
 {
@@ -621,27 +614,27 @@ bool mm_checkheap(int line)
         }
     }
 
-    // checking free list
-    cur_block = free_ptr;
-    // block_t* last_block = free_ptr->payload.list_node.prev;
+    // checking free list (only if free_ptr has been initialized)
     if(free_ptr)
     {
+        cur_block = free_ptr;
+        block_t* last_block = free_ptr->payload.list_node.prev;
         do
         {
-            // // checking if prev matches
-            // if(cur_block->payload.list_node.prev == last_block)
-            // {
-            //     printf("Prev pointer for block %p do not match. Called at %i\n",
-            //             cur_block, line);
-            //     return false;
-            // }
+            // checking if prev matches
+            if(cur_block->payload.list_node.prev != last_block)
+            {
+                printf("Prev pointer for block %p do not match. Called at %i\n",
+                        cur_block, line);
+                return false;
+            }
             // checking alloc bit to make sure block is free
             if(get_alloc(cur_block)) {
                 printf("Block %p in free list but is not free. Called at line %i\n",
                        cur_block, line);
                 return false;
             }
-            // last_block = cur_block;
+            last_block = cur_block;
             cur_block = find_next_free(cur_block);
         } while(free_ptr && cur_block != free_ptr);
     }
@@ -650,7 +643,8 @@ bool mm_checkheap(int line)
 }
 
 /*
- * in_list: checks if the given block is in the free list
+ * in_list: Checks if the given block is in the free list. Used only in the
+ *          heap checker
  */
 static bool in_list(block_t* block)
 {
@@ -742,7 +736,8 @@ static bool get_alloc(block_t *block)
 }
 
 /*
- * extract_prev_alloc:
+ * extract_prev_alloc: returns the prev_alloc bit from a given header value
+ *                     based on the header specification above.
  */
 static bool extract_prev_alloc(word_t header)
 {
@@ -750,7 +745,8 @@ static bool extract_prev_alloc(word_t header)
 }
 
 /*
- * get_prev_alloc:
+ * get_prev_alloc: returns the prev_alloc bit from a given block based on the
+ *                 header specification above.
  */
 static bool get_prev_alloc(block_t *block)
 {
