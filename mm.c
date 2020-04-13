@@ -168,6 +168,7 @@ bool mm_init(void)
     // Heap starts with first "block header", currently the epilogue footer
     heap_start = (block_t *) &(start[1]);
     free_ptr = NULL;
+    free_count = 0;
 
     // Extend the empty heap with a free block of chunksize bytes
     if (extend_heap(chunksize) == NULL)
@@ -508,6 +509,10 @@ static block_t *find_fit(size_t asize)
  * add_free_block: adds free block to the explicit list using a LIFO policy.
  */
 static void add_free_block(block_t *block) {
+    if(free_ptr == NULL) {
+        initialize_list(block);
+        return;
+    }
     block->payload.list_node.prev = free_ptr;
     block->payload.list_node.next = free_ptr->payload.list_node.next;
     free_ptr->payload.list_node.next->payload.list_node.prev = block;
