@@ -46,7 +46,7 @@
  * Debugging macros, with names beginning "dbg_" are allowed.
  * You may not define any other macros having arguments.
  */
-#define DEBUG // uncomment this line to enable debugging
+// #define DEBUG // uncomment this line to enable debugging
 
 #ifdef DEBUG
 /* When debugging is enabled, these form aliases to useful functions */
@@ -111,6 +111,7 @@ static block_t *free_ptr = NULL;
 static int free_count = 0;
 
 bool mm_checkheap(int lineno);
+static bool in_list(block_t* block);
 
 /* Function prototypes for internal helper routines */
 static block_t *extend_heap(size_t size);
@@ -245,6 +246,9 @@ void free(void *bp)
     block_t *next_block = find_next(block);
     update_prev_alloc(next_block, false);
 
+    // adding new free block to list
+    add_free_block(block);
+
     // coalescing incase neighboring blocks are also free
     coalesce(block);
     dbg_ensures(mm_checkheap(__LINE__));
@@ -357,13 +361,13 @@ static block_t *extend_heap(size_t size)
         free_ptr = block;
         free_ptr->payload.list_node.next = block;
         free_ptr->payload.list_node.prev = block;
-        // free_count = 1;
+        free_count = 1;
     }
 
-
     // Coalesce in case the neighboring blocks are free
-    return coalesce(block);
-
+    block_t* ret = coalesce(block);
+    // dbg_ensures(mm_checkheap(__LINE__));
+    return ret;
 }
 
 /*
@@ -375,37 +379,45 @@ static block_t *coalesce(block_t * block)
     block_t* new_block = block;
     size_t size = get_size(block);
 
-    // checking next
     block_t* next_block = find_next(block);
-    if(!get_alloc(next_block)) {
+
+    // checking next
+    if(!get_alloc(next_block))
+    {
         size += get_size(next_block);
         remove_block(next_block);
+        // reassigning free ptr if it is the next block
+        if(next_block == free_ptr)
+        {
+            free_ptr = new_block;
+        }
     }
 
     // checking previous
-    if(!get_prev_alloc(block)) {
+    if(!get_prev_alloc(block))
+    {
         word_t* prev_footer = find_prev_footer(block);
         if(!extract_alloc(*prev_footer)) {
             size += extract_size(*prev_footer);
             new_block = find_prev(block);
             remove_block(new_block);
+
+            //
+            new_block->payload.list_node.next = block->payload.list_node.next;
+            new_block->payload.list_node.prev = block->payload.list_node.prev;
+            find_next_free(block)->payload.list_node.prev = new_block;
+            block->payload.list_node.prev->payload.list_node.next = new_block;
+
+            if(block == free_ptr)
+            {
+                free_ptr = new_block;
+            }
+            // add_free_block(new_block);
         }
-    }
-
-    add_free_block(new_block);
-    ++free_count;
-
-    // edge case where the block being updated is the list root
-    if(block == free_ptr || (next_block == free_ptr && !get_alloc(next_block)))
-    {
-        remove_block(free_ptr);
-        free_count++;
-        free_ptr = new_block;
     }
 
     write_header(new_block, size, false);
     write_footer(new_block, size, false);
-
 
     return new_block;
 }
@@ -419,8 +431,8 @@ static void place(block_t *block, size_t asize)
     block_t *block_next; // pointer to next block in memory
 
     // pointers neighboring free block in the list
-    block_t *free_prev = block->payload.list_node.prev;
-    block_t *free_next = block->payload.list_node.next;
+    block_t *prev_free = block->payload.list_node.prev;
+    block_t *next_free = block->payload.list_node.next;
 
     // if we can split the block
     if ((csize - asize) >= min_block_size)
@@ -438,18 +450,18 @@ static void place(block_t *block, size_t asize)
         //------updating pointers given new block-------
         free_ptr = block_next;
         // updating neighboring pointers
-        free_prev->payload.list_node.next = block_next;
-        free_next->payload.list_node.prev = block_next;
+        prev_free->payload.list_node.next = block_next;
+        next_free->payload.list_node.prev = block_next;
         // writing new pointers to new block
-        if(free_next == block)
+        if(next_free == block)
             block_next->payload.list_node.next = block_next;
         else
-            block_next->payload.list_node.next = free_next;
+            block_next->payload.list_node.next = next_free;
 
-        if(free_next == block)
+        if(next_free == block)
             block_next->payload.list_node.prev = block_next;
         else
-            block_next->payload.list_node.prev = free_prev;
+            block_next->payload.list_node.prev = prev_free;
 
     }
     else
@@ -462,7 +474,11 @@ static void place(block_t *block, size_t asize)
 
         // removing block from list
         remove_block(block);
-        free_prev = find_next_free(block);
+        // if(free_ptr != find_next_free(free_ptr)) // if there is more than one node
+        if(free_count > 0)
+            free_ptr = find_next_free(block);
+        else
+            free_ptr = NULL;
     }
 }
 
@@ -499,6 +515,7 @@ static void add_free_block(block_t *block) {
     free_ptr->payload.list_node.next = block;
     if(free_ptr == free_ptr->payload.list_node.prev)
         free_ptr->payload.list_node.prev = block;
+    ++free_count;
 }
 
 /*
@@ -561,11 +578,30 @@ bool mm_checkheap(int line)
             }
 
             // checking if explicit list pointers are within the heap
-            if(cur_block->payload.list_node.next > (block_t*)mem_heap_hi() &&
-               cur_block->payload.list_node.prev > (block_t*)mem_heap_hi())
+            if(cur_block->payload.list_node.next > (block_t*)mem_heap_hi() ||
+               cur_block->payload.list_node.next < (block_t*)mem_heap_lo() ||
+               cur_block->payload.list_node.prev > (block_t*)mem_heap_hi() ||
+               cur_block->payload.list_node.prev < (block_t*)mem_heap_lo())
             {
                 printf("List nodes for block %p point out of bounds. "
-                       "Called at line %i", cur_block, line);
+                       "Called at line %i\n", cur_block, line);
+                return false;
+            }
+
+            // if free_ptr is null, then there should not be any free blocks
+            if(!free_ptr)
+            {
+                printf("Block %p is free but free_ptr is null. "
+                       "Called at line %i.\n",
+                        cur_block, line);
+                return false;
+            }
+
+            // checking if the free block is in the list
+            if(!in_list(cur_block))
+            {
+                printf("Block %p is free but not in list. Called at line %i.\n",
+                        cur_block, line);
                 return false;
             }
         }
@@ -574,12 +610,47 @@ bool mm_checkheap(int line)
         if(((char*)cur_block+get_size(cur_block)) > (char*)mem_heap_hi())
         {
             printf("Size of block %p extends past heap range."
-                   "Called on line %i", cur_block, line);
+                   "Called on line %i\n", cur_block, line);
             return false;
         }
     }
 
+    // checking free list
+    cur_block = free_ptr;
+    if(free_ptr)
+    {
+        do
+        {
+            // checking alloc bit to make sure block is free
+            if(get_alloc(cur_block)) {
+                printf("Block %p in free list but is not free. Called at line %i\n",
+                       cur_block, line);
+                return false;
+            }
+            cur_block = find_next_free(cur_block);
+        } while(free_ptr && cur_block != free_ptr);
+    }
+
     return true;
+}
+
+/*
+ * in_list: checks if the given block is in the free list
+ */
+static bool in_list(block_t* block)
+{
+    block_t* cur_block = free_ptr;
+    if(free_ptr)
+    {
+        do
+        {
+            if(block == cur_block) {
+                return true;
+            }
+            cur_block = find_next_free(cur_block);
+        } while(free_ptr && cur_block != free_ptr);
+    }
+    return false;
 }
 
 /*
