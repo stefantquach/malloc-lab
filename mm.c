@@ -6,8 +6,16 @@
  *                 CSE 361: Introduction to Computer Systems                  *
  *                                                                            *
  *  ************************************************************************  *
- *                     insert your documentation here. :)                     *
- *                                                                            *
+ *  Simple implementation of malloc using an explicit list with LIFO free     *
+ *  insertion and and Nth fit for allocation. Blocks are defined as below     *
+ *  Free Block:
+ *  | Header | Next | Previous |      Padding          | Footer |
+ *
+ *  Allocated Block:
+ *  | Header |                  Payload                         |
+ *
+ *  The current implementation uses the Nth fit with N=1, which is equivalent
+ *  to a first fit.
  *  ************************************************************************  *
  *  ** ADVICE FOR STUDENTS. **                                                *
  *  Step 0: Please read the writeup!                                          *
@@ -73,17 +81,22 @@ static const word_t alloc_mask = 0x1;
 static const word_t prev_alloc_mask = 0x2;
 static const word_t size_mask = ~(word_t)0xF;
 
+static const int num_candidates = 1; // Number of candidates for Nth fit
+
 // forward declarations
 struct block;
 typedef struct block block_t;
 
+// List node struct to make list operations more readable
 typedef struct ListNode {
     block_t* next;
     block_t* prev;
 } node_t;
 
 typedef union Payload {
+    /* Payload can be one of two things: data (if allocated) */
     char data[0];
+    /* or a list node (if free) */
     node_t list_node;
 } payload_t;
 
@@ -204,7 +217,8 @@ void *malloc(size_t size)
     }
 
     // Adjust block size to include overhead and to meet alignment requirements
-    asize = round_up(size + dsize, dsize);
+    asize = round_up(size + wsize, dsize);
+    asize = asize >= min_block_size ? asize : min_block_size;
 
     // Search the free list for a fit
     block = find_fit(asize);
@@ -258,7 +272,8 @@ void free(void *bp)
 }
 
 /*
- * <what does realloc do?>
+ * realloc: reallocates space to expand (or shrink) the given block to at least
+ *          a block of size size.
  */
 void *realloc(void *ptr, size_t size)
 {
@@ -302,7 +317,8 @@ void *realloc(void *ptr, size_t size)
 }
 
 /*
- * <what does calloc do?>
+ * calloc: allocates a new block of memory and initializes the block's content
+ *         to zero.
  */
 void *calloc(size_t elements, size_t size)
 {
@@ -355,7 +371,6 @@ static block_t *extend_heap(size_t size)
     if(free_ptr)
     {
         add_free_block(block);
-        free_ptr=block;
     }
     else
     {
@@ -448,16 +463,11 @@ static void place(block_t *block, size_t asize)
         prev_free->payload.list_node.next = block_next;
         next_free->payload.list_node.prev = block_next;
         // writing new pointers to new block
-        if(next_free == block)
-            block_next->payload.list_node.next = block_next;
-        else
-            block_next->payload.list_node.next = next_free;
+        block_next->payload.list_node.next =
+            next_free == block ? block_next : next_free;
 
-        if(next_free == block)
-            block_next->payload.list_node.prev = block_next;
-        else
-            block_next->payload.list_node.prev = prev_free;
-
+        block_next->payload.list_node.prev =
+            next_free == block ? block_next : prev_free;
     }
     else
     {
@@ -485,20 +495,34 @@ static void place(block_t *block, size_t asize)
 static block_t *find_fit(size_t asize)
 {
     block_t *block = free_ptr;
+    block_t *best_block = NULL;
+    size_t size, min_size = mem_heapsize();
+    int num_read = 0;
 
     if(free_ptr) {
         do
         {
-            if (asize <= get_size(block))
+            size = get_size(block);
+            if (asize <= size)
             {
-                return block;
+                if(size < min_size)
+                {
+                    min_size = size;
+                    best_block = block;
+                }
+                ++num_read;
+            }
+            if(num_read >= num_candidates)
+            {
+                return best_block;
             }
             block = find_next_free(block);
         } while(block != free_ptr);
     }
 
-
-    return NULL; // no fit found
+    // best block will be NULL if no fit was found, but the best fit if no other
+    // fit was found
+    return best_block;
 }
 
 /*
@@ -714,7 +738,8 @@ static size_t get_size(block_t *block)
 static word_t get_payload_size(block_t *block)
 {
     size_t asize = get_size(block);
-    return asize - dsize;
+    // asize = asize >= min_block_size : asize
+    return asize - wsize;
 }
 
 /*
