@@ -81,10 +81,10 @@ static const word_t alloc_mask = 0x1;
 static const word_t prev_alloc_mask = 0x2;
 static const word_t size_mask = ~(word_t)0xF;
 
-static const int num_candidates = 1; // Number of candidates for Nth fit
+static const int num_candidates = 3; // Number of candidates for Nth fit
 // static const int num_seg_lists = 15;
 #define num_seg_lists 15
-static const int seg_list_factor = 2;
+static const int seg_list_factor = 1;
 
 // forward declarations
 struct block;
@@ -277,10 +277,7 @@ void free(void *bp)
     update_prev_alloc(next_block, false);
 
     // coalescing incase neighboring blocks are also free
-    block = coalesce(block);
-
-    // adding new free block to list
-    add_free_block(block);
+    coalesce(block);
 
     dbg_ensures(mm_checkheap(__LINE__));
 }
@@ -382,12 +379,7 @@ static block_t *extend_heap(size_t size)
     update_prev_alloc(block_next, false);
 
     // Coalesce in case the neighboring blocks are free
-    block = coalesce(block);
-
-    // adding free block to list
-    add_free_block(block);
-
-    return block;
+    return coalesce(block);
 }
 
 /*
@@ -421,6 +413,9 @@ static block_t *coalesce(block_t * block)
     write_header(new_block, size, false);
     write_footer(new_block, size, false);
 
+    // adding free block
+    add_free_block(new_block);
+
     return new_block;
 }
 
@@ -452,20 +447,21 @@ static void place(block_t *block, size_t asize)
 
         //------updating pointers given new block-------
         // Updating head of list for next fit TODO Fix
-
-        int seg_index = add_free_block(block_next);
-        free_ptr_list[seg_index]=block_next;
+        add_free_block(block_next);
+        // free_ptr_list[seg_index]=block_next;
     }
     else
     {
+        // removing block from list
+        remove_block(block);
+
         // writing new header
         write_header(block, csize, true);
 
         block_next = find_next(block);
         update_prev_alloc(block_next, true);
 
-        // removing block from list
-        remove_block(block);
+
     }
 }
 
@@ -518,6 +514,7 @@ static block_t *find_fit(size_t asize)
  *                 Returns header of list the block was added to.
  */
 static int add_free_block(block_t *block) {
+    // finding which list to add to based on size
     block_t* free_ptr;
     int seg_index = find_list(get_size(block));
     free_ptr = free_ptr_list[seg_index];
@@ -525,18 +522,20 @@ static int add_free_block(block_t *block) {
         initialize_list(block, seg_index);
         return seg_index;
     }
-    block->payload.list_node.prev = free_ptr;
-    block->payload.list_node.next = free_ptr->payload.list_node.next;
-    free_ptr->payload.list_node.next->payload.list_node.prev = block;
-    free_ptr->payload.list_node.next = block;
-    if(free_ptr == free_ptr->payload.list_node.prev)
-        free_ptr->payload.list_node.prev = block;
-    // block->payload.list_node.next = free_ptr;
-    // block->payload.list_node.prev = free_ptr->payload.list_node.prev;
-    // free_ptr->payload.list_node.prev->payload.list_node.next = block;
-    // free_ptr->payload.list_node.prev = block;
-    // if(free_ptr == free_ptr->payload.list_node.next)
-    //     free_ptr->payload.list_node.next = block;
+
+    // adding the element
+    // block->payload.list_node.prev = free_ptr;
+    // block->payload.list_node.next = free_ptr->payload.list_node.next;
+    // free_ptr->payload.list_node.next->payload.list_node.prev = block;
+    // free_ptr->payload.list_node.next = block;
+    // if(free_ptr == free_ptr->payload.list_node.prev)
+    //     free_ptr->payload.list_node.prev = block;
+    block->payload.list_node.next = free_ptr;
+    block->payload.list_node.prev = free_ptr->payload.list_node.prev;
+    free_ptr->payload.list_node.prev->payload.list_node.next = block;
+    free_ptr->payload.list_node.prev = block;
+    if(free_ptr == free_ptr->payload.list_node.next)
+        free_ptr->payload.list_node.next = block;
     // ++free_count;
     return seg_index;
 }
@@ -717,7 +716,8 @@ static int find_list(size_t size)
         }
         bsize <<= seg_list_factor;
     }
-    return i;
+    // printf("%i", i);
+    return num_seg_lists-1;
 }
 
 /*
