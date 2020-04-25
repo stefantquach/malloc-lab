@@ -6,7 +6,7 @@
  *                 CSE 361: Introduction to Computer Systems                  *
  *                                                                            *
  *  ************************************************************************  *
- *  Simple implementation of malloc using an explicit list with LIFO free     *
+ *  Simple implementation of malloc using an segmented list                   *
  *  insertion and and Nth fit for allocation. Blocks are defined as below     *
  *  Free Block:
  *  | Header | Next | Previous |      Padding          | Footer |
@@ -14,8 +14,16 @@
  *  Allocated Block:
  *  | Header |                  Payload                         |
  *
- *  The current implementation uses the Nth fit with N=1, which is equivalent
- *  to a first fit.
+ *  Header:
+ *  | Size    | prev_sblock | sblock | prev_alloc | alloc |
+ *
+ *  The current implementation uses the Nth fit with N=3.
+ *  For optimizing smaller blocks, there is a specific "small" block which has
+ *  a fixed size of 16 bytes. The structure for allocated blocks is the same
+ *  but free blocks have a modified header and structure
+ *  | Header | Next |
+ *  Header:
+ *  | Prev     | prev_sblock | sblock | prev_alloc | alloc |
  *  ************************************************************************  *
  *  ** ADVICE FOR STUDENTS. **                                                *
  *  Step 0: Please read the writeup!                                          *
@@ -74,14 +82,17 @@
 typedef uint64_t word_t;
 static const size_t wsize = sizeof(word_t);   // word and header size (bytes)
 static const size_t dsize = 2*sizeof(word_t);       // double word size (bytes)
-static const size_t min_block_size = 4*sizeof(word_t); // Minimum block size
-static const size_t chunksize = (1 << 12);    // requires (chunksize % 16 == 0)
+static const size_t min_block_size = 2*sizeof(word_t); // Minimum block size
+static const size_t min_lblock_size = 4*sizeof(word_t); // Minimum normal block size
+static const size_t chunksize = (1 << 11);    // requires (chunksize % 16 == 0)
 
-static const word_t alloc_mask = 0x1;
-static const word_t prev_alloc_mask = 0x2;
+static const word_t alloc_mask = 0x1;      // denotes if the block is allocated
+static const word_t prev_alloc_mask = 0x2; // denotes if the prev block is alloc
+static const word_t sblock_mask = 0x4;     // denotes if the block is small
+static const word_t prev_sblock_mask = 0x8;// denotes if the prev block is small
 static const word_t size_mask = ~(word_t)0xF;
 
-static const int num_candidates = 3; // Number of candidates for Nth fit
+static const int num_candidates = 2; // Number of candidates for Nth fit
 // static const int num_seg_lists = 15;
 #define num_seg_lists 15
 static const int seg_list_factor = 1;
@@ -124,9 +135,7 @@ struct block
 /* Pointer to first block */
 static block_t *heap_start = NULL;
 /* Pointer to free blocks*/
-// static block_t *free_ptr = NULL;
 static block_t* free_ptr_list[num_seg_lists];
-// static int free_count = 0;
 
 bool mm_checkheap(int lineno);
 static bool in_list(block_t* block, block_t* free_ptr);
@@ -144,7 +153,8 @@ static int find_list(size_t size);
 
 static size_t max(size_t x, size_t y);
 static size_t round_up(size_t size, size_t n);
-static word_t pack(size_t size, bool alloc, bool prev_alloc);
+static word_t pack(size_t size, bool alloc, bool prev_alloc, bool sblock,
+                    bool prev_sblock);
 
 static size_t extract_size(word_t header);
 static size_t get_size(block_t *block);
@@ -154,11 +164,15 @@ static bool extract_alloc(word_t header);
 static bool get_alloc(block_t *block);
 static bool extract_prev_alloc(word_t header);
 static bool get_prev_alloc(block_t *block);
+static bool extract_sblock(word_t header);
+static bool get_sblock(block_t *block);
+static bool extract_prev_sblock(word_t header);
+static bool get_prev_sblock(block_t *block);
 
 static void write_header(block_t *block, size_t size, bool alloc);
 static void write_footer(block_t *block, size_t size, bool alloc);
 static void update_prev_alloc(block_t *block, bool prev_alloc);
-
+static void update_prev_sblock(block_t *block, bool prev_sblock);
 
 static block_t *payload_to_header(void *bp);
 static void *header_to_payload(block_t *block);
@@ -167,6 +181,8 @@ static block_t *find_next(block_t *block);
 static block_t *find_next_free(block_t *block);
 static word_t *find_prev_footer(block_t *block);
 static block_t *find_prev(block_t *block);
+static block_t *find_prev_ptr(block_t *block);
+static void write_prev_ptr(block_t* block, block_t* prev);
 
 
 /*
@@ -185,16 +201,15 @@ bool mm_init(void)
     }
 
     // Prologue footer's prev_alloc field does not matter
-    start[0] = pack(0, true, false); // Prologue footer
-    start[1] = pack(0, true, true); // Epilogue header
+    start[0] = pack(0, true, false, false, false); // Prologue footer
+    start[1] = pack(0, true, true, false, false); // Epilogue header
     // Heap starts with first "block header", currently the epilogue footer
     heap_start = (block_t *) &(start[1]);
-    // free_ptr = NULL;
+
     for(i=0; i<num_seg_lists; ++i)
     {
         free_ptr_list[i]=NULL;
     }
-    // free_count = 0;
 
     // Extend the empty heap with a free block of chunksize bytes
     if (extend_heap(chunksize) == NULL)
@@ -231,7 +246,7 @@ void *malloc(size_t size)
 
     // Adjust block size to include overhead and to meet alignment requirements
     asize = round_up(size + wsize, dsize);
-    asize = asize >= min_block_size ? asize : min_block_size;
+    // asize = asize >= min_block_size ? asize : min_block_size;
 
     // Search the free list for a fit
     block = find_fit(asize);
@@ -377,6 +392,7 @@ static block_t *extend_heap(size_t size)
     block_t *block_next = find_next(block);
     write_header(block_next, 0, true);
     update_prev_alloc(block_next, false);
+    update_prev_sblock(block_next, false);
 
     // Coalesce in case the neighboring blocks are free
     return coalesce(block);
@@ -388,6 +404,7 @@ static block_t *extend_heap(size_t size)
  */
 static block_t *coalesce(block_t * block)
 {
+    bool coalesced = false;
     block_t* new_block = block;
     size_t size = get_size(block);
 
@@ -399,6 +416,7 @@ static block_t *coalesce(block_t * block)
             size += extract_size(*prev_footer);
             new_block = find_prev(block);
             remove_block(new_block);
+            coalesced=true;
         }
     }
 
@@ -408,6 +426,7 @@ static block_t *coalesce(block_t * block)
     {
         size += get_size(next_block);
         remove_block(next_block);
+        coalesced=true;
     }
 
     write_header(new_block, size, false);
@@ -415,6 +434,14 @@ static block_t *coalesce(block_t * block)
 
     // adding free block
     add_free_block(new_block);
+
+    if(coalesced)
+    {
+        // updating prev_sblock
+        next_block=find_next(new_block);
+        // if were coalescing, the resulting block is never small
+        update_prev_sblock(next_block, false);
+    }
 
     return new_block;
 }
@@ -426,10 +453,6 @@ static void place(block_t *block, size_t asize)
 {
     size_t csize = get_size(block);
     block_t *block_next; // pointer to next block in memory
-
-    // pointers neighboring free block in the list
-    // block_t *prev_free = block->payload.list_node.prev;
-    // block_t *next_free = block->payload.list_node.next;
 
     // if we can split the block
     if ((csize - asize) >= min_block_size)
@@ -444,11 +467,16 @@ static void place(block_t *block, size_t asize)
         write_header(block_next, csize-asize, false);
         write_footer(block_next, csize-asize, false);
         update_prev_alloc(block_next, true);
+        update_prev_sblock(block_next, asize==min_block_size ? true:false);
 
         //------updating pointers given new block-------
-        // Updating head of list for next fit TODO Fix
+        // Adding newly freed block to list
         add_free_block(block_next);
-        // free_ptr_list[seg_index]=block_next;
+
+        // updating prev_sblock bit in the next next block if the split block
+        // is small
+        block_next = find_next(block_next);
+        update_prev_sblock(block_next, csize-asize==min_block_size ? true:false);
     }
     else
     {
@@ -460,8 +488,7 @@ static void place(block_t *block, size_t asize)
 
         block_next = find_next(block);
         update_prev_alloc(block_next, true);
-
-
+        update_prev_sblock(block_next, csize==min_block_size ? true:false);
     }
 }
 
@@ -485,7 +512,7 @@ static block_t *find_fit(size_t asize)
             do
             {
                 size = get_size(block);
-                if (asize <= size) // TODO remove, might be unnecessary
+                if (asize <= size)
                 {
                     if(size < min_size)
                     {
@@ -503,7 +530,6 @@ static block_t *find_fit(size_t asize)
         }
     }
 
-
     // best block will be NULL if no fit was found, but the best fit if no other
     // fit was found
     return best_block;
@@ -518,25 +544,23 @@ static int add_free_block(block_t *block) {
     block_t* free_ptr;
     int seg_index = find_list(get_size(block));
     free_ptr = free_ptr_list[seg_index];
-    if(free_ptr == NULL) {
+    if(free_ptr == NULL)
+    {
         initialize_list(block, seg_index);
         return seg_index;
     }
 
     // adding the element
-    // block->payload.list_node.prev = free_ptr;
-    // block->payload.list_node.next = free_ptr->payload.list_node.next;
-    // free_ptr->payload.list_node.next->payload.list_node.prev = block;
-    // free_ptr->payload.list_node.next = block;
-    // if(free_ptr == free_ptr->payload.list_node.prev)
-    //     free_ptr->payload.list_node.prev = block;
     block->payload.list_node.next = free_ptr;
-    block->payload.list_node.prev = free_ptr->payload.list_node.prev;
-    free_ptr->payload.list_node.prev->payload.list_node.next = block;
-    free_ptr->payload.list_node.prev = block;
+    // block->payload.list_node.prev = free_ptr->payload.list_node.prev;
+    write_prev_ptr(block, find_prev_ptr(free_ptr));
+    block_t* prev = find_prev_ptr(free_ptr);
+    // free_ptr->payload.list_node.prev->payload.list_node.next = block;
+    prev->payload.list_node.next = block;
+    // free_ptr->payload.list_node.prev = block;
+    write_prev_ptr(free_ptr, block);
     if(free_ptr == free_ptr->payload.list_node.next)
         free_ptr->payload.list_node.next = block;
-    // ++free_count;
     return seg_index;
 }
 
@@ -549,6 +573,7 @@ static void remove_block(block_t *block)
 {
     int seg_index = find_list(get_size(block));
     block_t* free_ptr = free_ptr_list[seg_index];
+
     if(block == free_ptr) {
         if(free_ptr != free_ptr->payload.list_node.next)
             free_ptr_list[seg_index] = find_next_free(block);
@@ -556,12 +581,11 @@ static void remove_block(block_t *block)
             free_ptr_list[seg_index] = NULL;
             return;
         }
-
     }
     block_t* next_blk = block->payload.list_node.next;
-    block_t* prev_blk = block->payload.list_node.prev;
+    block_t* prev_blk = find_prev_ptr(block);
 
-    next_blk->payload.list_node.prev = prev_blk;
+    write_prev_ptr(next_blk, prev_blk);
     prev_blk->payload.list_node.next = next_blk;
     // --free_count;
 }
@@ -576,6 +600,7 @@ bool mm_checkheap(int line)
     block_t* cur_block;
     bool freed = false;
     bool prev_alloc = true;
+    bool prev_sblock = false;
     for(cur_block=heap_start; get_size(cur_block) > 0;
         cur_block=find_next(cur_block))
     {
@@ -587,6 +612,15 @@ bool mm_checkheap(int line)
             return false;
         }
         prev_alloc = get_alloc(cur_block);
+
+        // checking prev_sblock bit
+        if(get_prev_sblock(cur_block) != prev_sblock)
+        {
+            printf("Prev_sblock bit in block %p don't match allocation in "
+                   "previous block. Called at line %i.\n", cur_block, line);
+            return false;
+        }
+        prev_sblock = get_sblock(cur_block);
 
         // checking for two contiguous free block
         if(freed && !get_alloc(cur_block))
@@ -601,20 +635,23 @@ bool mm_checkheap(int line)
         if(freed)
         {
             // checking if headers and footers match
-            word_t* footerp = (word_t *)((cur_block->payload.data) +
-                                get_size(cur_block) - dsize);
-            if(cur_block->header != *footerp)
-            {
-                printf("Header and footer do not match for block "
-                        "%p. Called at line %i.\n", cur_block, line);
-                return false;
+            if(!get_sblock(cur_block)) {
+                word_t* footerp = (word_t *)((cur_block->payload.data) +
+                                    get_size(cur_block) - dsize);
+                if(cur_block->header != *footerp)
+                {
+                    printf("Header and footer do not match for block "
+                            "%p. Called at line %i.\n", cur_block, line);
+                    return false;
+                }
             }
+
 
             // checking if explicit list pointers are within the heap
             if(cur_block->payload.list_node.next > (block_t*)mem_heap_hi() ||
                cur_block->payload.list_node.next < (block_t*)mem_heap_lo() ||
-               cur_block->payload.list_node.prev > (block_t*)mem_heap_hi() ||
-               cur_block->payload.list_node.prev < (block_t*)mem_heap_lo())
+               find_prev_ptr(cur_block) > (block_t*)mem_heap_hi() ||
+               find_prev_ptr(cur_block) < (block_t*)mem_heap_lo())
             {
                 printf("List nodes for block %p point out of bounds. "
                        "Called at line %i\n", cur_block, line);
@@ -654,11 +691,11 @@ bool mm_checkheap(int line)
         if(free_ptr_list[i])
         {
             cur_block = free_ptr_list[i];
-            block_t* last_block = free_ptr_list[i]->payload.list_node.prev;
+            block_t* last_block = find_prev_ptr(free_ptr_list[i]);
             do
             {
                 // checking if prev matches
-                if(cur_block->payload.list_node.prev != last_block)
+                if(find_prev_ptr(cur_block) != last_block)
                 {
                     printf("Prev pointer for block %p do not match. Called at %i\n",
                             cur_block, line);
@@ -701,14 +738,16 @@ static bool in_list(block_t* block, block_t* free_ptr)
 }
 
 /*
- * find_list: finds the corresponding list
+ * find_list: finds the corresponding list. Returns -1 if the block is small
  */
 static int find_list(size_t size)
 {
-    // TODO switch to a binary search
+    if(size == min_block_size) // if its a small block
+        return 0;
+    // Performs linear search
     int i;
-    size_t bsize = min_block_size;
-    for(i=0; i<num_seg_lists;++i)
+    size_t bsize = min_lblock_size;
+    for(i=1; i<num_seg_lists;++i)
     {
         if(size >= bsize && size < (bsize << seg_list_factor))
         {
@@ -716,7 +755,6 @@ static int find_list(size_t size)
         }
         bsize <<= seg_list_factor;
     }
-    // printf("%i", i);
     return num_seg_lists-1;
 }
 
@@ -740,10 +778,11 @@ static size_t round_up(size_t size, size_t n)
  * pack: returns a header reflecting a specified size and its alloc status.
  *       If the block is allocated, the lowest bit is set to 1, and 0 otherwise.
  */
-static word_t pack(size_t size, bool alloc, bool prev_alloc)
+static word_t pack(size_t size, bool alloc, bool prev_alloc, bool sblock,
+                    bool prev_sblock)
 {
     // return alloc ? (size | alloc_mask) : size;
-    return size | alloc | (prev_alloc << 1);
+    return size | alloc | (prev_alloc << 1) | (sblock << 2) | (prev_sblock<< 3);
 }
 
 
@@ -753,6 +792,10 @@ static word_t pack(size_t size, bool alloc, bool prev_alloc)
  */
 static size_t extract_size(word_t word)
 {
+    if(extract_sblock(word))
+    {
+        return min_block_size;
+    }
     return (word & size_mask);
 }
 
@@ -813,6 +856,42 @@ static bool get_prev_alloc(block_t *block)
 }
 
 /*
+ * get_sblock: returns the prev_alloc bit from a given block based on the
+ *                 header specification above.
+ */
+static bool get_sblock(block_t *block)
+{
+    return extract_sblock(block->header);
+}
+
+/*
+ * extract_sblock: returns the prev_alloc bit from a given block based on the
+ *                 header specification above.
+ */
+static bool extract_sblock(word_t header)
+{
+    return (bool)(header & sblock_mask);
+}
+
+/*
+ * get_prev_sblock: returns the prev_alloc bit from a given block based on the
+ *                 header specification above.
+ */
+static bool get_prev_sblock(block_t *block)
+{
+    return extract_prev_sblock(block->header);
+}
+
+/*
+ * extract_prev_sblock: returns the prev_alloc bit from a given block based on the
+ *                 header specification above.
+ */
+static bool extract_prev_sblock(word_t header)
+{
+    return (bool)(header & prev_sblock_mask);
+}
+
+/*
  * write_header: given a block and its size and allocation status,
  *               writes an appropriate value to the block header.
  * Note: this method only updates the size and alloc field. It does not effect
@@ -820,7 +899,8 @@ static bool get_prev_alloc(block_t *block)
  */
 static void write_header(block_t *block, size_t size, bool alloc)
 {
-    block->header = pack(size, alloc, block->header & prev_alloc_mask);
+    block->header = pack(size, alloc, block->header & prev_alloc_mask,
+                         size==dsize ? true:false, block->header & prev_sblock_mask);
 }
 
 /*
@@ -832,8 +912,12 @@ static void write_header(block_t *block, size_t size, bool alloc)
  */
 static void write_footer(block_t *block, size_t size, bool alloc)
 {
-    word_t *footerp = (word_t *)((block->payload.data) + get_size(block) - dsize);
-    *footerp = pack(size, alloc, (block->header & prev_alloc_mask));
+    if(!get_sblock(block)) // small blocks have no footer
+    {
+        word_t *footerp = (word_t *)((block->payload.data) + get_size(block) - dsize);
+        *footerp = pack(size, alloc, block->header & prev_alloc_mask,
+                        false, block->header & prev_sblock_mask);
+    }
 }
 
 /*
@@ -847,10 +931,28 @@ static void update_prev_alloc(block_t *block, bool prev_alloc)
     block->header |= prev_alloc << 1;  // writing the prev_alloc bit
 
     // writing prev_alloc for footer
-    if(!get_alloc(block)) {
+    if(!get_alloc(block) && !get_sblock(block)) {
         word_t *footerp = (word_t *)((block->payload.data) + get_size(block) - dsize);
         *footerp &= ~prev_alloc_mask;
         *footerp |= prev_alloc << 1;
+    }
+}
+
+/*
+ * update_prev_sblock: updates the prev_alloc bit in both header and footer for
+ *                    a given block. Only updates footer if the block is free.
+ */
+static void update_prev_sblock(block_t *block, bool prev_sblock)
+{
+    // writing prev_sblock for header
+    block->header &= ~prev_sblock_mask; // clearing prev_alloc bit
+    block->header |= prev_sblock << 3;  // writing the prev_alloc bit
+
+    // writing prev_sblock for footer only if block is not allocated
+    if(!get_alloc(block) && !get_sblock(block)) {
+        word_t *footerp = (word_t *)((block->payload.data) + get_size(block) - dsize);
+        *footerp &= ~prev_sblock_mask;
+        *footerp |= prev_sblock << 3;
     }
 }
 
@@ -861,8 +963,8 @@ static void initialize_list(block_t* block, int seg_index)
 {
     free_ptr_list[seg_index] = block;
     block->payload.list_node.next = block;
-    block->payload.list_node.prev = block;
-    // free_count = 1;
+    // block->payload.list_node.prev = block;
+    write_prev_ptr(block, block);
 }
 
 /*
@@ -892,8 +994,13 @@ static block_t *find_next_free(block_t *block)
  */
 static word_t *find_prev_footer(block_t *block)
 {
-    // Compute previous footer position as one word before the header
-    return (&(block->header)) - 1;
+    if(!get_prev_sblock(block)) {
+        // Compute previous footer position as one word before the header
+        return (&(block->header)) - 1;
+    } else {
+        return (&(block->header)) - 2;
+    }
+
 }
 
 /*
@@ -903,9 +1010,50 @@ static word_t *find_prev_footer(block_t *block)
  */
 static block_t *find_prev(block_t *block)
 {
-    word_t *footerp = find_prev_footer(block);
-    size_t size = extract_size(*footerp);
-    return (block_t *)((char *)block - size);
+    if(!get_prev_sblock(block))
+    {
+        word_t *footerp = find_prev_footer(block);
+        size_t size = extract_size(*footerp);
+        return (block_t *)((char *)block - size);
+    }
+    else
+    {
+        // small blocks always have a length of 16 bytes
+        return (block_t*)((char*)block - dsize);
+    }
+
+}
+
+/*
+ * find_prev_ptr: Returns the prev pointer in blocks. This method exists because
+ *                small blocks store the prev pointer in the header.
+ */
+static block_t *find_prev_ptr(block_t *block)
+{
+    if(get_sblock(block))
+    {
+        return (block_t*)((block->header & size_mask) + 0x8);
+    }
+    else
+    {
+        return block->payload.list_node.prev;
+    }
+}
+
+/*
+ * write_prev_ptr: writes to the prev pointer in blocks. This method exists
+ *                 because small blocks store the prev pointer in the header.
+ */
+static void write_prev_ptr(block_t* block, block_t* prev)
+{
+    if(get_sblock(block))
+    {
+        block->header = ((word_t)prev & size_mask) | (block->header & ~size_mask);
+    }
+    else
+    {
+        block->payload.list_node.prev = prev;
+    }
 }
 
 /*
