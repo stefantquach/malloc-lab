@@ -84,7 +84,7 @@ static const size_t wsize = sizeof(word_t);   // word and header size (bytes)
 static const size_t dsize = 2*sizeof(word_t);       // double word size (bytes)
 static const size_t min_block_size = 2*sizeof(word_t); // Minimum block size
 static const size_t min_lblock_size = 4*sizeof(word_t); // Minimum normal block size
-static const size_t chunksize = (1 << 11);    // requires (chunksize % 16 == 0)
+static const size_t chunksize = (1 << 12);    // requires (chunksize % 16 == 0)
 
 static const word_t alloc_mask = 0x1;      // denotes if the block is allocated
 static const word_t prev_alloc_mask = 0x2; // denotes if the prev block is alloc
@@ -92,7 +92,7 @@ static const word_t sblock_mask = 0x4;     // denotes if the block is small
 static const word_t prev_sblock_mask = 0x8;// denotes if the prev block is small
 static const word_t size_mask = ~(word_t)0xF;
 
-static const int num_candidates = 2; // Number of candidates for Nth fit
+static const int num_candidates = 1; // Number of candidates for Nth fit
 // static const int num_seg_lists = 15;
 #define num_seg_lists 15
 static const int seg_list_factor = 1;
@@ -246,7 +246,6 @@ void *malloc(size_t size)
 
     // Adjust block size to include overhead and to meet alignment requirements
     asize = round_up(size + wsize, dsize);
-    // asize = asize >= min_block_size ? asize : min_block_size;
 
     // Search the free list for a fit
     block = find_fit(asize);
@@ -552,12 +551,9 @@ static int add_free_block(block_t *block) {
 
     // adding the element
     block->payload.list_node.next = free_ptr;
-    // block->payload.list_node.prev = free_ptr->payload.list_node.prev;
     write_prev_ptr(block, find_prev_ptr(free_ptr));
     block_t* prev = find_prev_ptr(free_ptr);
-    // free_ptr->payload.list_node.prev->payload.list_node.next = block;
     prev->payload.list_node.next = block;
-    // free_ptr->payload.list_node.prev = block;
     write_prev_ptr(free_ptr, block);
     if(free_ptr == free_ptr->payload.list_node.next)
         free_ptr->payload.list_node.next = block;
@@ -815,7 +811,6 @@ static size_t get_size(block_t *block)
 static word_t get_payload_size(block_t *block)
 {
     size_t asize = get_size(block);
-    // asize = asize >= min_block_size : asize
     return asize - wsize;
 }
 
@@ -856,7 +851,7 @@ static bool get_prev_alloc(block_t *block)
 }
 
 /*
- * get_sblock: returns the prev_alloc bit from a given block based on the
+ * get_sblock: returns the sblock bit from a given block based on the
  *                 header specification above.
  */
 static bool get_sblock(block_t *block)
@@ -865,7 +860,7 @@ static bool get_sblock(block_t *block)
 }
 
 /*
- * extract_sblock: returns the prev_alloc bit from a given block based on the
+ * extract_sblock: returns the sblock bit from a given header based on the
  *                 header specification above.
  */
 static bool extract_sblock(word_t header)
@@ -874,7 +869,7 @@ static bool extract_sblock(word_t header)
 }
 
 /*
- * get_prev_sblock: returns the prev_alloc bit from a given block based on the
+ * get_prev_sblock: returns the prev_sblock bit from a given block based on the
  *                 header specification above.
  */
 static bool get_prev_sblock(block_t *block)
@@ -883,7 +878,7 @@ static bool get_prev_sblock(block_t *block)
 }
 
 /*
- * extract_prev_sblock: returns the prev_alloc bit from a given block based on the
+ * extract_prev_sblock: returns the prev_sblock bit from a given header based on the
  *                 header specification above.
  */
 static bool extract_prev_sblock(word_t header)
